@@ -1,0 +1,250 @@
+-- LocalScript → StarterPlayer > StarterPlayerScripts (ваша игра, Studio)
+-- Портальная пушка и порталы. Всё создаётся только на вашем клиенте.
+-- Пушка: Q или кнопка «Пушка». Выстрел: клик мыши / кнопка «ПОРТАЛ» на телефоне.
+-- Первый выстрел открывает портал 1, второй — портал 2, дальше каждый новый заменяет старейший.
+-- Подойдите к любому порталу вплотную, чтобы пройти во второй.
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+
+local player = Players.LocalPlayer
+local V = Vector3.new
+
+local PW, PH = 5.2, 8 -- размер портала: ширина, высота
+local MAX_DIST = 300
+local FIRE_COOLDOWN = 0.35
+local TP_COOLDOWN = 1.0
+
+local LIGHT = Color3.fromRGB(206, 207, 212)
+local LIGHT2 = Color3.fromRGB(184, 186, 192)
+local GREYD = Color3.fromRGB(120, 122, 130)
+local BLACK = Color3.fromRGB(28, 28, 32)
+local RED = Color3.fromRGB(225, 40, 40)
+local LIME = Color3.fromRGB(150, 255, 70)
+local GREEN = Color3.fromRGB(60, 210, 60)
+local DGREEN = Color3.fromRGB(18, 100, 36)
+
+local S = {
+	char = nil,
+	hum = nil,
+	root = nil,
+	equipped = false,
+	gun = nil,
+	shoulderC0 = nil,
+	raised = false,
+	portals = {}, -- [1], [2]
+	dying = {},
+	nextSlot = 1,
+	fireCd = 0,
+	tpCd = 0,
+	kick = 0,
+	flash = 0,
+	tpFlash = 0,
+	shots = {},
+}
+
+---------------------------------------------------------------- интерфейс (каркас)
+local touchOnly = UIS.TouchEnabled and not UIS.MouseEnabled
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "PortalGunUI"
+gui.ResetOnSpawn = false
+gui.DisplayOrder = 45
+gui.Parent = player:WaitForChild("PlayerGui")
+
+local frame = Instance.new("Frame")
+frame.BackgroundTransparency = 1
+frame.Position = UDim2.new(0, 12, 0.3, 0)
+frame.Size = UDim2.fromOffset(130, 150)
+frame.Parent = gui
+
+local layout = Instance.new("UIListLayout")
+layout.Padding = UDim.new(0, 6)
+layout.SortOrder = Enum.SortOrder.LayoutOrder
+layout.Parent = frame
+
+local status = Instance.new("TextLabel")
+status.LayoutOrder = 10
+status.Size = UDim2.new(1, 0, 0, 56)
+status.BackgroundTransparency = 1
+status.Font = Enum.Font.Gotham
+status.TextSize = 11
+status.TextColor3 = Color3.fromRGB(190, 255, 160)
+status.TextWrapped = true
+status.TextXAlignment = Enum.TextXAlignment.Left
+status.TextYAlignment = Enum.TextYAlignment.Top
+status.Text = "Q или «Пушка» — достать. Клик / «ПОРТАЛ» — выстрел."
+status.Parent = frame
+
+local function say(msg)
+	status.Text = msg
+end
+
+local function styleButton(b, round)
+	b.BackgroundColor3 = Color3.fromRGB(16, 22, 16)
+	b.BackgroundTransparency = 0.1
+	b.BorderSizePixel = 0
+	b.Font = Enum.Font.GothamBold
+	b.TextColor3 = Color3.fromRGB(190, 255, 160)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = round and UDim.new(1, 0) or UDim.new(0, 8)
+	c.Parent = b
+	local s = Instance.new("UIStroke")
+	s.Color = LIME
+	s.Thickness = 1.4
+	s.Transparency = 0.3
+	s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	s.Parent = b
+end
+
+local function mkButton(label, order, onClick)
+	local b = Instance.new("TextButton")
+	b.LayoutOrder = order
+	b.Size = UDim2.new(1, 0, 0, 36)
+	b.TextSize = 14
+	b.Text = label
+	styleButton(b, false)
+	b.Parent = frame
+	b.Activated:Connect(onClick)
+	return b
+end
+
+local fireBtn = Instance.new("TextButton")
+fireBtn.AnchorPoint = Vector2.new(1, 1)
+fireBtn.Position = UDim2.new(1, -24, 1, -24)
+fireBtn.Size = UDim2.fromOffset(80, 80)
+fireBtn.TextSize = 14
+fireBtn.Text = "ПОРТАЛ"
+fireBtn.Visible = false
+styleButton(fireBtn, true)
+fireBtn.Parent = gui
+
+local cross = Instance.new("Frame")
+cross.AnchorPoint = Vector2.new(0.5, 0.5)
+cross.Position = UDim2.fromScale(0.5, 0.5)
+cross.Size = UDim2.fromOffset(8, 8)
+cross.BackgroundColor3 = LIME
+cross.BackgroundTransparency = 0.2
+cross.BorderSizePixel = 0
+cross.Visible = false
+cross.Parent = gui
+do
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(1, 0)
+	c.Parent = cross
+end
+
+local flashFrame = Instance.new("Frame")
+flashFrame.Size = UDim2.fromScale(1, 1)
+flashFrame.BackgroundColor3 = LIME
+flashFrame.BackgroundTransparency = 1
+flashFrame.BorderSizePixel = 0
+flashFrame.Active = false
+flashFrame.ZIndex = 100
+flashFrame.Parent = gui
+
+---------------------------------------------------------------- модель пушки
+local function buildGun()
+	local model = Instance.new("Model")
+	model.Name = "LocalPortalGun"
+
+	local function setup(p)
+		p.Anchored = false
+		p.CanCollide = false
+		p.CanQuery = false
+		p.CanTouch = false
+		p.Massless = true
+		p.CastShadow = false
+		p.TopSurface = Enum.SurfaceType.Smooth
+		p.BottomSurface = Enum.SurfaceType.Smooth
+	end
+
+	local root = Instance.new("Part")
+	root.Name = "GunRoot"
+	root.Size = V(0.2, 0.2, 0.2)
+	root.Transparency = 1
+	setup(root)
+	root.Parent = model
+
+	local gripWeld = Instance.new("Weld")
+	gripWeld.Part1 = root
+	gripWeld.Parent = root
+
+	local function add(name, size, cf, color, material, shape, tr)
+		local p = Instance.new("Part")
+		p.Name = name
+		p.Size = size
+		p.Color = color
+		p.Material = material or Enum.Material.SmoothPlastic
+		p.Transparency = tr or 0
+		if shape then
+			p.Shape = shape
+		end
+		setup(p)
+		local w = Instance.new("Weld")
+		w.Part0 = root
+		w.Part1 = p
+		w.C0 = cf
+		w.Parent = p
+		p.Parent = model
+		return p, w
+	end
+
+	local CYL = Enum.PartType.Cylinder
+	local BALL = Enum.PartType.Ball
+	local UP = CFrame.Angles(0, 0, math.rad(90)) -- цилиндр стоймя
+
+	local function cylV(name, h, d, pos, color, mat, tr)
+		return add(name, V(h, d, d), CFrame.new(pos) * UP, color, mat, CYL, tr)
+	end
+
+	-- корпус, перёд, рукоятка
+	add("Body", V(0.62, 0.42, 1.1), CFrame.new(0, 0.1, -0.55), LIGHT)
+	add("BodyFront", V(0.5, 0.34, 0.3), CFrame.new(0, 0.08, -1.25), LIGHT2)
+	add("Handle", V(0.3, 0.32, 1.0), CFrame.new(0, -0.1, 0.5) * CFrame.Angles(math.rad(20), 0, 0), LIGHT)
+	add("HandleEnd", V(0.34, 0.34, 0.34), CFrame.new(0, -0.27, 0.97), LIGHT, nil, BALL)
+	add("RailL", V(0.05, 0.12, 0.95), CFrame.new(-0.33, 0.02, -0.5), GREYD)
+	add("RailR", V(0.05, 0.12, 0.95), CFrame.new(0.33, 0.02, -0.5), GREYD)
+
+	-- красный дисплей и чёрная ручка
+	add("Bezel", V(0.3, 0.04, 0.46), CFrame.new(0, 0.33, -0.4), GREYD)
+	add("Display", V(0.2, 0.05, 0.34), CFrame.new(0, 0.345, -0.4), RED, Enum.Material.Neon, nil, 0.1)
+	cylV("Knob", 0.12, 0.22, V(0, 0.37, -0.08), BLACK, Enum.Material.SmoothPlastic)
+
+	-- зелёный купол с энергией
+	cylV("DomeBase", 0.14, 0.62, V(0, 0.38, -0.85), LIGHT2)
+	local dome = cylV("DomeGlass", 0.55, 0.42, V(0, 0.725, -0.85), GREEN, Enum.Material.Neon, 0.2)
+	add("DomeTop", V(0.42, 0.42, 0.42), CFrame.new(0, 1.0, -0.85), GREEN, Enum.Material.Neon, BALL, 0.2)
+	local core = cylV("DomeCore", 0.5, 0.22, V(0, 0.725, -0.85), Color3.fromRGB(205, 255, 150), Enum.Material.Neon, 0.1)
+
+	local light = Instance.new("PointLight")
+	light.Color = Color3.fromRGB(110, 255, 90)
+	light.Range = 9
+	light.Brightness = 1.2
+	light.Shadows = false
+	light.Parent = core
+
+	local em = Instance.new("ParticleEmitter")
+	em.Rate = 30
+	em.Lifetime = NumberRange.new(0.5, 0.9)
+	em.Speed = NumberRange.new(0.2, 0.5)
+	em.SpreadAngle = Vector2.new(180, 180)
+	em.RotSpeed = NumberRange.new(-180, 180)
+	em.Size = NumberSequence.new(0.12, 0)
+	em.LightEmission = 1
+	em.Color = ColorSequence.new(Color3.fromRGB(235, 255, 210), LIME)
+	em.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.1), NumberSequenceKeypoint.new(1, 1) })
+	em.Parent = core
+
+	-- две «искры», кружащие внутри купола
+	local specks = {}
+	for i = 1, 2 do
+		local p, w = add("Speck", V(0.07, 0.07, 0.07), CFrame.new(0, 0.725, -0.85), Color3.new(1, 1, 1),
+			Enum.Material.Neon, BALL)
+		specks[i] = { weld = w, ph = (i - 1) * math.pi }
+	end
+
+	return { model = model, root = root, weld = gripWeld, dome = dome, light = light, specks = specks, baseC0 = CFrame.new() }
+end
